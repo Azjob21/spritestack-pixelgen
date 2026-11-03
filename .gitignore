@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Models (large binary files — do not commit)
+models/pixel-art-model/
+models/loras/
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+*.onnx
+
+# Eval outputs (generated images)
+eval/*/
+!eval/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

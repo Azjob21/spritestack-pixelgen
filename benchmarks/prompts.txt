@@ -1,0 +1,42 @@
+# SpriteStack PixelGen — Evaluation prompt set (v0)
+# One prompt per line. Lines starting with # are comments.
+
+# Characters
+small slime enemy
+knight with sword
+red dragon
+wizard casting spell
+skeleton warrior
+goblin archer
+blue ghost
+robot soldier
+ninja character
+pirate captain
+
+# Items
+treasure chest
+health potion
+magic sword
+golden key
+crystal gem
+wooden shield
+fire scroll
+
+# Environment tiles
+stone brick wall
+grass tile
+wooden door
+lava pool
+ice crystal
+tree
+cactus
+barrel
+torch on wall
+
+# Enemies
+boss monster
+fire elemental
+giant spider
+bat creature
+snake enemy
+mushroom creature

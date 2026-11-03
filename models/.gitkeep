@@ -1,0 +1,6 @@
+# Model weights go here. They are NOT tracked in git.
+# See README.md for setup instructions.
+#
+# Expected layout:
+#   models/pixel-art-model/   (DreamShaper 8 LCM checkpoint)
+#   models/loras/             (PixelArt Redmond LoRA .safetensors)

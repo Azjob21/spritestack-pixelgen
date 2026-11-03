@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "spritestack-pixelgen"
+version = "0.1.0"
+description = "Text-to-pixel-art generation pipeline for SpriteStack Studio"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Azjob21" },
+]
+
+dependencies = [
+    "diffusers>=0.25.0",
+    "transformers>=4.36.0",
+    "accelerate>=0.25.0",
+    "torch>=2.1.0",
+    "Pillow>=10.0.0",
+    "safetensors>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-benchmark>=4.0",
+]
+server = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+]
+onnx = [
+    "optimum[openvino]>=1.14.0",
+    "onnxruntime>=1.16.0",
+]
+
+[project.scripts]
+pixelgen = "pixelgen.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
