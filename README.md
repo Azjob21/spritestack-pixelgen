@@ -26,7 +26,7 @@
 
 ---
 
-## Sample Gallery(show off hhh)
+## Sample Gallery
 
 All sprites below were generated with the v0 pipeline — **no cherry-picking**, just one prompt, one seed, one output.
 
