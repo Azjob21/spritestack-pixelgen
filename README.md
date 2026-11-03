@@ -6,7 +6,7 @@
   <img src="docs/samples/skeleton_64.png" width="128" alt="Skeleton">
 </p>
 
-<h1 align="center">🎮 SpriteStack PixelGen</h1>
+<h1 align="center">SpriteStack PixelGen</h1>
 
 <p align="center">
   <strong>Text-to-pixel-art sprite generation pipeline for <a href="https://github.com/Azjob21/spritestack">SpriteStack Studio</a></strong>
@@ -26,7 +26,7 @@
 
 ---
 
-## ✨ Sample Gallery
+## Sample Gallery(show off hhh)
 
 All sprites below were generated with the v0 pipeline — **no cherry-picking**, just one prompt, one seed, one output.
 
@@ -44,33 +44,33 @@ All sprites below were generated with the v0 pipeline — **no cherry-picking**,
 
 ---
 
-## 🏗️ What this is (and is not)
+## What this is (and is not)
 
 v0 **composes existing open models** — it does not train a new one.
 
 The original work is the **pipeline**: prompt design, LCM fast sampling, LoRA fusing, pixel-grid post-processing, palette reduction, and Studio integration.
 
-| Component | Used in v0 | Source |
-|---|---|---|
-| Base model | Stable Diffusion 1.5, DreamShaper 8 LCM | `Lykon/dreamshaper-8-lcm` |
-| Style LoRA | PixelArt Redmond (SD 1.5), fused at scale 0.9 | see its model card for author and licence |
-| Scheduler | `LCMScheduler`, 8 steps, guidance 1.8 | diffusers |
-| Post-processing | Nearest-neighbour pixelation, resize, 32-colour quantisation | this repo |
+| Component       | Used in v0                                                   | Source                                    |
+| --------------- | ------------------------------------------------------------ | ----------------------------------------- |
+| Base model      | Stable Diffusion 1.5, DreamShaper 8 LCM                      | `Lykon/dreamshaper-8-lcm`                 |
+| Style LoRA      | PixelArt Redmond (SD 1.5), fused at scale 0.9                | see its model card for author and licence |
+| Scheduler       | `LCMScheduler`, 8 steps, guidance 1.8                        | diffusers                                 |
+| Post-processing | Nearest-neighbour pixelation, resize, 32-colour quantisation | this repo                                 |
 
 Model weights are **not** distributed here. Check each model's licence before redistributing.
 
 ---
 
-## ⚙️ Pipeline
+## Pipeline
 
 ```mermaid
 flowchart LR
-  P["📝 Text prompt"] --> A["🔧 Prompt augmentation"]
-  A --> D["🧠 SD 1.5 + LCM + LoRA<br/>512×512, 8 steps"]
-  D --> X["🔲 Pixelate<br/>8px cells → 64×64 grid"]
-  X --> R["📐 Resize to target"]
-  R --> Q["🎨 Quantise<br/>32 colours"]
-  Q --> H["📦 RGBA hex stream"]
+  P[" Text prompt"] --> A["🔧 Prompt augmentation"]
+  A --> D[" SD 1.5 + LCM + LoRA<br/>512×512, 8 steps"]
+  D --> X[" Pixelate<br/>8px cells → 64×64 grid"]
+  X --> R[" Resize to target"]
+  R --> Q[" Quantise<br/>32 colours"]
+  Q --> H[" RGBA hex stream"]
 ```
 
 **API Contract** (`POST /generate-sprite`)
@@ -85,44 +85,45 @@ flowchart LR
 
 ---
 
-## 📊 Benchmarks
+## Benchmarks
 
 > v0 baseline on Intel Core i7-1065G7 (CPU-only, fp32, 8 steps, guidance 1.8)
 
-| ID | Change | CPU latency | Quality notes |
-|---|---|---|---|
-| **v0** | **Baseline** | **~116–125s** | Solid pixel-art style, no transparency, fixed seed |
-| e1 | Trigger word (`PixArFK`) + prompt cleanup | TBD | TBD |
-| e2 | Guidance 1.0 (CFG off) | TBD | Expected ~50% speedup |
-| e3 | 4 steps | TBD | Expected ~50% speedup |
-| e4 | Grid snapping + palette presets | TBD | TBD |
-| e5 | Background removal | TBD | TBD |
-| e6 | OpenVINO / ONNX export | TBD | Expected major CPU speedup |
+| ID     | Change                                    | CPU latency   | Quality notes                                      |
+| ------ | ----------------------------------------- | ------------- | -------------------------------------------------- |
+| **v0** | **Baseline**                              | **~116–125s** | Solid pixel-art style, no transparency, fixed seed |
+| e1     | Trigger word (`PixArFK`) + prompt cleanup | TBD           | TBD                                                |
+| e2     | Guidance 1.0 (CFG off)                    | TBD           | Expected ~50% speedup                              |
+| e3     | 4 steps                                   | TBD           | Expected ~50% speedup                              |
+| e4     | Grid snapping + palette presets           | TBD           | TBD                                                |
+| e5     | Background removal                        | TBD           | TBD                                                |
+| e6     | OpenVINO / ONNX export                    | TBD           | Expected major CPU speedup                         |
 
 **Target:** Bring generation under **10 seconds** on CPU through combined optimizations.
 
 ---
 
-## 🚨 Known Limitations (v0)
+## Known Limitations (v0)
 
-| # | Issue | Impact |
-|---|---|---|
-| 1 | **No transparency** — SD outputs RGB, alpha is always 255 | Background baked into sprite |
-| 2 | **Grid decimation** — naive resize skips cells for small targets | Detail loss at 16×16, 32×32 |
-| 3 | **Fixed seed (42)** — same prompt = same image | No variation/re-roll |
-| 4 | **CFG on** (guidance 1.8 + negative prompt) | Doubles UNet work per step |
-| 5 | **Missing trigger word** — `PixArFK` not in prompt | LoRA may not fully activate |
-| 6 | **Generic palette** — no DB32/PICO-8/Endesga 32 | Colours don't match Studio presets |
+| #   | Issue                                                            | Impact                             |
+| --- | ---------------------------------------------------------------- | ---------------------------------- |
+| 1   | **No transparency** — SD outputs RGB, alpha is always 255        | Background baked into sprite       |
+| 2   | **Grid decimation** — naive resize skips cells for small targets | Detail loss at 16×16, 32×32        |
+| 3   | **Fixed seed (42)** — same prompt = same image                   | No variation/re-roll               |
+| 4   | **CFG on** (guidance 1.8 + negative prompt)                      | Doubles UNet work per step         |
+| 5   | **Missing trigger word** — `PixArFK` not in prompt               | LoRA may not fully activate        |
+| 6   | **Generic palette** — no DB32/PICO-8/Endesga 32                  | Colours don't match Studio presets |
 
 ---
 
-## 🗺️ Roadmap
+## Roadmap
 
 <table>
   <tr>
     <td>
 
-**Phase 0: Baseline** ✅
+**Phase 0: Baseline**
+
 - [x] Extract pipeline to standalone package
 - [x] 30-prompt evaluation set
 - [ ] Full benchmark sweep on named hardware
@@ -132,6 +133,7 @@ flowchart LR
     <td>
 
 **Phase 1: Quality**
+
 - [ ] LoRA trigger word + prompt cleanup
 - [ ] Proper grid snapping (dominant colour per cell)
 - [ ] Palette-constrained quantisation
@@ -144,6 +146,7 @@ flowchart LR
     <td>
 
 **Phase 2: Speed**
+
 - [ ] Step count sweep (8 → 6 → 4)
 - [ ] CFG off (guidance 1.0)
 - [ ] Resolution sweep (512 → 384)
@@ -155,6 +158,7 @@ flowchart LR
     <td>
 
 **Phase 3: Model & Release**
+
 - [ ] LoRA scale sweep
 - [ ] Alternative LoRAs (LCM-LoRA, Hyper-SD)
 - [ ] Train custom pixel-art LoRA
@@ -167,7 +171,7 @@ flowchart LR
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 # Install
@@ -188,7 +192,7 @@ python -m pixelgen.server --port 8000
 
 ---
 
-## 📁 Repo Layout
+## Repo Layout
 
 ```
 spritestack-pixelgen/
@@ -202,33 +206,33 @@ spritestack-pixelgen/
 ├── benchmarks/prompts.txt  # 30 evaluation prompts
 ├── docs/samples/           # generated sprite gallery
 ├── eval/                   # benchmark outputs per experiment
-├── tests/                  # unit tests (6 passing ✅)
+├── tests/                  # unit tests (6 passing )
 └── models/                 # weights (gitignored)
 ```
 
 ---
 
-## 📏 Evaluation Metrics
+## Evaluation Metrics
 
-| Metric | What it measures |
-|---|---|
-| **Latency p50 / p95** | Generation speed |
-| **Peak memory** | RAM/VRAM footprint |
-| **Unique colour count** | Palette discipline |
-| **Grid cleanliness** | Fraction of uniform cells after grid detection |
-| **Transparency rate** | Outputs with clean background cut |
-| **CLIP score** | Prompt–image alignment |
-| **Blind A/B pref** | Human judgement on fixed prompt set |
+| Metric                  | What it measures                               |
+| ----------------------- | ---------------------------------------------- |
+| **Latency p50 / p95**   | Generation speed                               |
+| **Peak memory**         | RAM/VRAM footprint                             |
+| **Unique colour count** | Palette discipline                             |
+| **Grid cleanliness**    | Fraction of uniform cells after grid detection |
+| **Transparency rate**   | Outputs with clean background cut              |
+| **CLIP score**          | Prompt–image alignment                         |
+| **Blind A/B pref**      | Human judgement on fixed prompt set            |
 
 ---
 
-## 🙏 Credits
+## Credits
 
 - **Base model:** DreamShaper 8 LCM (see its [model card](https://huggingface.co/Lykon/dreamshaper-8-lcm))
 - **Style LoRA:** PixelArt Redmond for SD 1.5 (see its model card)
 - **Libraries:** Hugging Face `diffusers`, PyTorch, Pillow
 - **Project:** Part of [SpriteStack Studio](https://github.com/Azjob21/spritestack) (supervised by Prof. Chaib Souleyman)
 
-## 📄 License
+## License
 
 Code: **MIT**. Model weights keep their original licences.
