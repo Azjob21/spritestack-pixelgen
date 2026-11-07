@@ -20,15 +20,15 @@
 </p>
 
 <p align="center">
-  Type a prompt → get a pixel-art sprite in seconds.<br>
-  Built for game dev. Integrated into SpriteStack Studio.
+  Type a prompt → get a transparent pixel-art sprite, on CPU, with no GPU required.<br>
+  A showcase project for SpriteStack Studio.
 </p>
 
 ---
 
 ## Sample Gallery
 
-All sprites below were generated with the v0 pipeline — **no cherry-picking**, just one prompt, one seed, one output.
+All sprites below were generated with the **v0** pipeline (the original baseline) — no cherry-picking, just one prompt, one seed, one output. The current default (`s6`) uses faster sampling and the newer post-processing described below, so its output differs.
 
 <table>
   <tr>
@@ -40,24 +40,26 @@ All sprites below were generated with the v0 pipeline — **no cherry-picking**,
   </tr>
 </table>
 
-> **Hardware:** Intel Core i7-1065G7 (CPU-only, fp32) · ~116s per sprite · 8 LCM steps at 512×512 → pixelated to 64×64
+> **Hardware:** Intel Core i7-1065G7 (4 cores, CPU-only, fp32). The times above were measured in the first runs and include cold-start overhead. Steady-state v0 is about 96s per sprite (see [Benchmarks](#benchmarks)).
 
 ---
 
 ## What this is (and is not)
 
-v0 **composes existing open models** — it does not train a new one.
+PixelGen **composes existing open models** — it does not train a new one.
 
-The original work is the **pipeline**: prompt design, LCM fast sampling, LoRA fusing, pixel-grid post-processing, palette reduction, and Studio integration.
+The original work is the **pipeline**: prompt design, LCM fast sampling, LoRA fusing, background keying, pixel-grid snapping, palette reduction, sprite cleanup, an OpenVINO CPU path, and Studio integration.
 
-| Component       | Used in v0                                                   | Source                                    |
-| --------------- | ------------------------------------------------------------ | ----------------------------------------- |
-| Base model      | Stable Diffusion 1.5, DreamShaper 8 LCM                      | `Lykon/dreamshaper-8-lcm`                 |
-| Style LoRA      | PixelArt Redmond (SD 1.5), fused at scale 0.9                | see its model card for author and licence |
-| Scheduler       | `LCMScheduler`, 8 steps, guidance 1.8                        | diffusers                                 |
-| Post-processing | Nearest-neighbour pixelation, resize, 32-colour quantisation | this repo                                 |
+| Component       | Used                                                                                                  | Source                                                  |
+| --------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Base model      | Stable Diffusion 1.5, DreamShaper 8 LCM                                                               | `Lykon/dreamshaper-8-lcm`                               |
+| Style LoRA      | PixelArt Redmond 1.5V (SD 1.5), fused at scale 0.9                                                    | `artificialguybr/pixelartredmond-1-5v-pixel-art-loras-for-sd-1-5` |
+| Scheduler       | `LCMScheduler`, 6 steps, guidance 2.5 (default `s6`)                                                  | diffusers                                               |
+| Decoder         | TAESD (tiny VAE)                                                                                      | `madebyollin/taesd`                                     |
+| Post-processing | Background keying, median-per-cell grid snapping, palette snapping, cleanup, optional outline         | this repo                                               |
+| CPU runtime     | PyTorch (default) or OpenVINO fp32 / int8 via `optimum-intel` (benchmark script)                      | `optimum-intel`                                         |
 
-Model weights are **not** distributed here. Check each model's licence before redistributing.
+Model weights are **not** distributed here. See [Licences](#licences) before redistributing.
 
 ---
 
@@ -65,54 +67,77 @@ Model weights are **not** distributed here. Check each model's licence before re
 
 ```mermaid
 flowchart LR
-  P[" Text prompt"] --> A["🔧 Prompt augmentation"]
-  A --> D[" SD 1.5 + LCM + LoRA<br/>512×512, 8 steps"]
-  D --> X[" Pixelate<br/>8px cells → 64×64 grid"]
-  X --> R[" Resize to target"]
-  R --> Q[" Quantise<br/>32 colours"]
-  Q --> H[" RGBA hex stream"]
+  P["Text prompt"] --> A["Prompt template"]
+  A --> D["SD 1.5 + LCM + LoRA<br/>512x512, 6 steps, guidance 2.5"]
+  D --> V["TAESD decode"]
+  V --> K["Background keying<br/>colour key + edge-bounded flood"]
+  K --> G["Grid snap<br/>median per cell"]
+  G --> C["Cleanup<br/>specks, strays, grey wedges"]
+  C --> Q["Palette snap<br/>DB32 / PICO-8 / Endesga 32"]
+  Q --> H["RGBA hex stream"]
 ```
 
 **API Contract** (`POST /generate-sprite`)
 
 ```json
-// Request
-{ "prompt": "small slime enemy", "width": 32, "height": 32 }
+// Request (only prompt is typically needed)
+{ "prompt": "small slime enemy", "width": 32, "height": 32,
+  "seed": 123, "palette": "db32", "variant": "s6" }
 
 // Response
-{ "hex": "RRGGBBAA...", "width": 32, "height": 32, "prompt": "...", "model": "..." }
+{ "hex": "RRGGBBAA...", "width": 32, "height": 32, "prompt": "...",
+  "model": "spritestack-pixelgen-s6", "seed": 123, "variant": "s6",
+  "palette": "db32", "timings": { "unet_s": 0, "decode_s": 0, "post_s": 0, "total_s": 0 } }
 ```
+
+`seed`, `palette` and `variant` are optional. The server's default variant comes from `PIXELGEN_VARIANT` (default `s6`).
 
 ---
 
 ## Benchmarks
 
-> v0 baseline on Intel Core i7-1065G7 (CPU-only, fp32, 8 steps, guidance 1.8)
+Measured on an Intel Core i7-1065G7 (CPU-only, fp32), 64×64 output, seed 42, steady-state p50 after a warm-up generation. Run-to-run noise is about ±25%, so use the Best performance power plan and plug in the laptop. Each row is **3 prompts** (red dragon, wizard casting spell, skeleton warrior) with a single seed, so quality notes are one-sample judgements.
 
-| ID     | Change                                    | CPU latency   | Quality notes                                      |
-| ------ | ----------------------------------------- | ------------- | -------------------------------------------------- |
-| **v0** | **Baseline**                              | **~116–125s** | Solid pixel-art style, no transparency, fixed seed |
-| e1     | Trigger word (`PixArFK`) + prompt cleanup | TBD           | TBD                                                |
-| e2     | Guidance 1.0 (CFG off)                    | TBD           | Expected ~50% speedup                              |
-| e3     | 4 steps                                   | TBD           | Expected ~50% speedup                              |
-| e4     | Grid snapping + palette presets           | TBD           | TBD                                                |
-| e5     | Background removal                        | TBD           | TBD                                                |
-| e6     | OpenVINO / ONNX export                    | TBD           | Expected major CPU speedup                         |
+| Config                                         | UNet  | Decode | p50    | Verdict                                              |
+| ---------------------------------------------- | ----- | ------ | ------ | ---------------------------------------------------- |
+| **v0** (8 steps, guidance 1.8)                 | 84s   | 13s    | 96s    | Crisp reference (about 115s on a cold start)         |
+| Magenta-backdrop prompt (`e2`)                 | 85s   | 13s    | 96s    | Subjects tinted and wrong — abandoned                |
+| CFG off (guidance 1.0, `g3`)                   | 46s   | 13s    | 59s    | Style destroyed                                      |
+| 4 steps (`s4`)                                 | 43s   | 13s    | 56s    | Style holds, loses coherence on complex subjects     |
+| 4 steps + TAESD                                | 42s   | 0.9s   | 43s    | TAESD is visually lossless in practice               |
+| 4 steps + TAESD + guidance 2.5                 | 41s   | 0.9s   | 41.6s  | Sharper, weak on complex subjects                    |
+| 384px generation                               | 26s   | 0.7s   | 27.5s  | Dragon collapses                                     |
+| 448px generation                               | 36s   | 0.9s   | 37s    | Only about 13% faster, no gain                       |
+| 5 steps + TAESD + guidance 2.5                 | 50s   | 0.8s   | 50.4s  | Wings return, smudgy                                 |
+| **6 steps + TAESD + guidance 2.5 (`s6`)**      | 71s   | 1.0s   | 73.8s  | **Recommended default** — dragon and wizard readable |
+| 8 steps + TAESD + guidance 2.5                 | 91s   | 0.9s   | 93s    | Best quality, no faster than v0                      |
+| `s6` on OpenVINO fp32                          | 60.5s | 1.2s   | 60.7s  | Steadier timings (60.2–64.4s)                        |
+| `s6` on OpenVINO int8 (weight compression)     | 50.7s | 1.3s   | 52.3s  | Quality looked equal on 3 sprites                    |
 
-**Target:** Bring generation under **10 seconds** on CPU through combined optimizations.
+Findings:
+
+- The UNet is about 86% of the total time; the VAE decode is about 14% without TAESD, and post-processing is negligible (about 0.1s).
+- Below 512px the model collapses, so generation stays at 512×512.
+- Guidance 2.5 makes backdrops gradient or vignetted; the edge-bounded keying handles that.
+- OpenVINO int8 gave about 14% over fp32 and about 30% over PyTorch at 6 steps.
+
+**Target:** under **10 seconds** on CPU. **Not reached.** The best measured result is about 52s (OpenVINO int8, 6 steps). The remaining cost is the number of UNet passes (6 steps at guidance 2.5 is 12 passes at 512×512). Getting to about 10s would need a different model class (for example a small model trained for low resolution) or a GPU. Few-step distilled models such as Hyper-SD have not been tested.
 
 ---
 
-## Known Limitations (v0)
+## Known Limitations
 
-| #   | Issue                                                            | Impact                             |
-| --- | ---------------------------------------------------------------- | ---------------------------------- |
-| 1   | **No transparency** — SD outputs RGB, alpha is always 255        | Background baked into sprite       |
-| 2   | **Grid decimation** — naive resize skips cells for small targets | Detail loss at 16×16, 32×32        |
-| 3   | **Fixed seed (42)** — same prompt = same image                   | No variation/re-roll               |
-| 4   | **CFG on** (guidance 1.8 + negative prompt)                      | Doubles UNet work per step         |
-| 5   | **Missing trigger word** — `PixArFK` not in prompt               | LoRA may not fully activate        |
-| 6   | **Generic palette** — no DB32/PICO-8/Endesga 32                  | Colours don't match Studio presets |
+| #   | Issue                                                                                                           | Status                                  |
+| --- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| 1   | **Default seed is fixed (42)** — same prompt gives the same image unless `--seed` / `seed` is passed             | Pass a seed for variation               |
+| 2   | **Warm-toned ground rims** — a brown rim can remain around feet (for example the wizard) or a dragon's underside | Open; neutral-grey cleanup misses it    |
+| 3   | **Skeleton prompt** produces an armoured warrior, not a skeleton                                                | Open; prompt problem, not a step-count one |
+| 4   | **Stray scene objects** can appear in raw output; the cleanup drops small detached ones                          | Reduced, not eliminated                 |
+| 5   | **Low-contrast grey-on-grey objects** (for example rocks near a slime) can be eaten by the grey cleanup          | Tune `grey_chroma` or set it to 0       |
+| 6   | **One seed per prompt** in all benchmarks                                                                        | Needs multi-seed evaluation             |
+| 7   | **Not 10s** — see [Benchmarks](#benchmarks)                                                                      | Open                                    |
+
+Fixed since v0: transparency (hard 0/255 alpha via background keying), grid decimation (median-per-cell snapping), palette presets (DB32, PICO-8, Endesga 32), and a tiny-VAE decoder.
 
 ---
 
@@ -126,7 +151,7 @@ flowchart LR
 
 - [x] Extract pipeline to standalone package
 - [x] 30-prompt evaluation set
-- [ ] Full benchmark sweep on named hardware
+- [ ] Full benchmark sweep on all 30 prompts (so far: 3 hard prompts)
 - [ ] Save v0 sample grids to `eval/v0/`
 
 </td>
@@ -134,11 +159,14 @@ flowchart LR
 
 **Phase 1: Quality**
 
-- [ ] LoRA trigger word + prompt cleanup
-- [ ] Proper grid snapping (dominant colour per cell)
-- [ ] Palette-constrained quantisation
-- [ ] Background removal (hard 0/255 alpha)
-- [ ] Seed control + batch candidates
+- [x] Prompt experiments (magenta-backdrop ladder tried and dropped)
+- [x] Grid snapping (median colour per cell)
+- [x] Palette-constrained quantisation
+- [x] Background removal (hard 0/255 alpha)
+- [x] Seed control
+- [ ] Batch candidates
+- [ ] Better prompts (single subject, no ground, plain background)
+- [ ] Warm-toned shadow / ground-rim cleanup
 
 </td>
   </tr>
@@ -147,12 +175,14 @@ flowchart LR
 
 **Phase 2: Speed**
 
-- [ ] Step count sweep (8 → 6 → 4)
-- [ ] CFG off (guidance 1.0)
-- [ ] Resolution sweep (512 → 384)
-- [ ] Tiny VAE (TAESD)
-- [ ] OpenVINO / ONNX (CPU path)
-- [ ] `torch.compile` + `channels_last`
+- [x] Step count sweep (8 → 6 → 5 → 4)
+- [x] CFG off (rejected: style collapses)
+- [x] Resolution sweep (rejected: below 512 collapses)
+- [x] Tiny VAE (TAESD)
+- [x] OpenVINO fp32 and int8 (benchmark script)
+- [x] `channels_last`
+- [ ] OpenVINO backend in the server
+- [ ] `torch.compile`
 
 </td>
     <td>
@@ -160,7 +190,8 @@ flowchart LR
 **Phase 3: Model & Release**
 
 - [ ] LoRA scale sweep
-- [ ] Alternative LoRAs (LCM-LoRA, Hyper-SD)
+- [ ] Few-step distilled alternatives (for example Hyper-SD — untested)
+- [ ] Small low-resolution model for a 10s CPU path
 - [ ] Train custom pixel-art LoRA
 - [ ] Hugging Face Space demo
 - [ ] Weights on HF Hub
@@ -177,11 +208,14 @@ flowchart LR
 # Install
 pip install -e ".[dev]"
 
-# Generate a sprite
-python -m pixelgen.cli generate "knight with silver armor" --size 64x64 --out knight.png
+# Generate a sprite (default variant: s6)
+python -m pixelgen generate "knight with silver armor" --size 64x64 --seed 7 --out knight.png
 
-# Run the full benchmark (30 prompts)
-python -m pixelgen.cli benchmark --prompts benchmarks/prompts.txt --out eval/v0/
+# Run a benchmark (writes timings.csv, summary.txt, sheet.png)
+python -m pixelgen benchmark --prompts benchmarks/hard3.txt --save-raw --out eval/
+
+# Override any setting for an ablation
+python -m pixelgen benchmark --variant s6 --steps 8 --prompts benchmarks/hard3.txt --out eval/
 
 # Start the Studio-compatible API server
 pip install -e ".[server]"
@@ -190,6 +224,21 @@ python -m pixelgen.server --port 8000
 
 > **Note:** Place model weights under `models/pixel-art-model/` and `models/loras/` before running. See [models/.gitkeep](models/.gitkeep) for details.
 
+### Optional: OpenVINO (faster on CPU)
+
+```bash
+pip install optimum-intel[openvino]
+
+# One-time export (fuses the LoRA at 0.9, static 512x512 shapes)
+python ov_bench.py export --lora-scale 0.9 --out models/ov-pixelart
+
+# Benchmark it
+python ov_bench.py bench --model models/ov-pixelart --steps 6 --guidance 2.5 --tiny-vae \
+    --prompts benchmarks/hard3.txt --save-raw --out eval_ov/
+```
+
+For int8 weights, convert the fused model with `optimum-cli export openvino --model <fused_model_dir> --task text-to-image --weight-format int8 models/ov-int8` and pass `--model models/ov-int8`. The OpenVINO path currently runs through `ov_bench.py`; it is not wired into the server yet.
+
 ---
 
 ## Repo Layout
@@ -197,16 +246,17 @@ python -m pixelgen.server --port 8000
 ```
 spritestack-pixelgen/
 ├── src/pixelgen/
-│   ├── pipeline.py         # v0 frozen baseline (tagged ISSUE(v0) comments)
-│   ├── postprocess.py      # pixelation, resize, quantisation
+│   ├── pipeline.py         # config-driven pipeline, VARIANTS registry (default: s6)
+│   ├── postprocess.py      # keying, grid snapping, palette, cleanup, outline
 │   ├── palettes.py         # DB32, PICO-8, Endesga 32 palette data
-│   ├── encode.py           # fast RGBA ↔ hex encoding
+│   ├── encode.py           # fast RGBA <-> hex encoding
 │   ├── cli.py              # generate + benchmark commands
 │   └── server.py           # FastAPI drop-in for Studio
-├── benchmarks/prompts.txt  # 30 evaluation prompts
+├── ov_bench.py             # OpenVINO export + benchmark
+├── benchmarks/             # prompts.txt (30 prompts), hard3.txt (dragon, wizard, skeleton)
 ├── docs/samples/           # generated sprite gallery
 ├── eval/                   # benchmark outputs per experiment
-├── tests/                  # unit tests (6 passing )
+├── tests/                  # unit tests (52 passing)
 └── models/                 # weights (gitignored)
 ```
 
@@ -224,13 +274,30 @@ spritestack-pixelgen/
 | **CLIP score**          | Prompt–image alignment                         |
 | **Blind A/B pref**      | Human judgement on fixed prompt set            |
 
+Currently reported: latency (p50 / p95) and transparency rate. The rest are planned.
+
+---
+
+## Licences
+
+Code: **MIT**. Model weights keep their original licences and are not distributed in this repo.
+
+| Model                    | Licence                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| PixelArt Redmond 1.5V    | Listed on Hugging Face as `bespoke-lora-trained-license` (other). Read the model card before reuse. |
+| DreamShaper 8 LCM        | See its [model card](https://huggingface.co/Lykon/dreamshaper-8-lcm)                 |
+| TAESD                    | See its [model card](https://huggingface.co/madebyollin/taesd)                       |
+
+SpriteStack Studio is a project to showcase the models, not a commercial product, but check each licence before any redistribution or commercial use.
+
 ---
 
 ## Credits
 
 - **Base model:** DreamShaper 8 LCM (see its [model card](https://huggingface.co/Lykon/dreamshaper-8-lcm))
-- **Style LoRA:** PixelArt Redmond for SD 1.5 (see its model card)
-- **Libraries:** Hugging Face `diffusers`, PyTorch, Pillow
+- **Style LoRA:** PixelArt Redmond 1.5V by artificialguybr (see its [model card](https://huggingface.co/artificialguybr/pixelartredmond-1-5v-pixel-art-loras-for-sd-1-5))
+- **Tiny VAE:** TAESD by madebyollin
+- **Libraries:** Hugging Face `diffusers`, PyTorch, Pillow, SciPy, `optimum-intel` / OpenVINO
 - **Project:** Part of [SpriteStack Studio](https://github.com/Azjob21/spritestack) (supervised by Prof. Chaib Souleyman)
 
 ## License

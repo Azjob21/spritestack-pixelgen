@@ -1,133 +1,170 @@
 """
-CLI entry point for spritestack-pixelgen.
+CLI for spritestack-pixelgen.
 
-Usage:
-    python -m pixelgen.cli generate "small slime enemy" --size 32x32 --out slime.png
-    python -m pixelgen.cli benchmark --prompts benchmarks/prompts.txt --out eval/v0/
+    python -m pixelgen generate "small slime enemy" --size 32x32 --out slime.png
+    python -m pixelgen benchmark --variant v0,e1,e2,e3 --out eval/
+    python -m pixelgen benchmark --variant e2 --steps 6      # single-variable ablation
 """
 from __future__ import annotations
 
 import argparse
+import csv
+import platform
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
+from .pipeline import DEFAULT_VARIANT, VARIANTS, generate, get_config, load_pipeline
+
+
+def _size(s: str) -> tuple[int, int]:
+    w, h = (int(x) for x in s.lower().split("x"))
+    return w, h
+
+
+def _overrides(args: argparse.Namespace) -> dict:
+    return dict(steps=args.steps, guidance=args.guidance, gen_size=args.gen_size,
+                palette=args.palette, outline=True if args.outline else None,
+                tiny_vae=True if args.tiny_vae else None, bg_tol=args.bg_tol, edge_thr=args.edge_thr,
+                lora_scale=args.lora_scale, prompt_style=args.prompt_style)
+
+
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--steps", type=int, default=None)
+    p.add_argument("--guidance", type=float, default=None)
+    p.add_argument("--gen-size", type=int, default=None)
+    p.add_argument("--palette", default=None, help="db32 | pico8 | endesga32")
+    p.add_argument("--outline", action="store_true")
+    p.add_argument("--tiny-vae", action="store_true", help="use TAESD for decoding")
+    p.add_argument("--bg-tol", type=float, default=None, help="backdrop keying tolerance")
+    p.add_argument("--edge-thr", type=float, default=None,
+                   help="edge threshold for gradient-aware keying (0 = off, default 2.0)")
+    p.add_argument("--lora-scale", type=float, default=None, help="style LoRA strength")
+    p.add_argument("--prompt-style", default=None, choices=["v0", "v0t", "clean"])
+    p.add_argument("--save-raw", action="store_true", help="also save the raw model output")
+
 
 def cmd_generate(args: argparse.Namespace) -> None:
-    """Generate a single sprite and save it."""
-    from .pipeline import generate
-
-    w, h = (int(x) for x in args.size.split("x"))
-    seed = args.seed if args.seed is not None else None
-
-    print(f"Generating {w}×{h} sprite for: {args.prompt!r}")
-    t0 = time.perf_counter()
-    img = generate(prompt=args.prompt, width=w, height=h, seed=seed)
-    elapsed = time.perf_counter() - t0
-    print(f"Done in {elapsed:.2f}s")
-
+    w, h = _size(args.size)
+    print(f"Generating {w}x{h} [{args.variant}] for: {args.prompt!r}")
+    res = generate(args.prompt, w, h, seed=args.seed, config=args.variant, **_overrides(args))
+    t = res.timings
+    print(f"seed={res.seed}  unet={t['unet_s']:.1f}s  decode={t['decode_s']:.2f}s  "
+          f"post={t['post_s']:.3f}s  total={t['total_s']:.1f}s")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    img.save(str(out))
+    res.image.save(out)
+    if args.save_raw and res.raw is not None:
+        res.raw.save(out.with_name(out.stem + "_raw.png"))
     print(f"Saved to {out}")
 
 
-def cmd_benchmark(args: argparse.Namespace) -> None:
-    """Run the benchmark suite over a prompt file."""
-    from .pipeline import generate, load_pipeline
+def _contact_sheet(images: list[Image.Image], cols: int = 6, cell: int = 128) -> Image.Image:
+    rows = (len(images) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * cell, rows * cell), (70, 70, 80))
+    for i, im in enumerate(images):
+        tile = Image.new("RGB", (cell, cell), (70, 70, 80))
+        # checkerboard so transparency is visible
+        px = tile.load()
+        for y in range(cell):
+            for x in range(cell):
+                if ((x // 8) + (y // 8)) % 2:
+                    px[x, y] = (90, 90, 100)
+        s = max(1, cell // max(im.size))
+        big = im.convert("RGBA").resize((im.width * s, im.height * s), Image.Resampling.NEAREST)
+        tile.paste(big, ((cell - big.width) // 2, (cell - big.height) // 2), big)
+        sheet.paste(tile, ((i % cols) * cell, (i // cols) * cell))
+    return sheet
 
+
+def cmd_benchmark(args: argparse.Namespace) -> None:
     prompts_file = Path(args.prompts)
     if not prompts_file.exists():
-        print(f"Prompts file not found: {prompts_file}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(f"Prompts file not found: {prompts_file}")
+    prompts = [l.strip() for l in prompts_file.read_text().splitlines()
+               if l.strip() and not l.strip().startswith("#")]
+    if args.limit:
+        prompts = prompts[: args.limit]
+    w, h = _size(args.size)
+    variants = [v.strip() for v in args.variant.split(",") if v.strip()]
+    for v in variants:
+        if v not in VARIANTS:
+            sys.exit(f"Unknown variant {v!r}. Available: {sorted(VARIANTS)}")
 
-    prompts = [
-        line.strip()
-        for line in prompts_file.read_text().splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    root = Path(args.out)
+    for v in variants:
+        cfg = get_config(v, **_overrides(args))
+        out_dir = root / cfg.name
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    w, h = (int(x) for x in args.size.split("x"))
-    seed = args.seed
-
-    # Warm up the pipeline
-    print("Loading pipeline (warm-up)...")
-    t0 = time.perf_counter()
-    load_pipeline()
-    warmup_time = time.perf_counter() - t0
-    print(f"Pipeline loaded in {warmup_time:.2f}s")
-
-    timings: list[float] = []
-    for i, prompt in enumerate(prompts, 1):
-        print(f"[{i}/{len(prompts)}] {prompt!r}", end=" ", flush=True)
         t0 = time.perf_counter()
-        img = generate(prompt=prompt, width=w, height=h, seed=seed)
-        elapsed = time.perf_counter() - t0
-        timings.append(elapsed)
-        print(f"→ {elapsed:.2f}s")
+        load_pipeline(cfg)
+        load_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        generate(prompts[0], w, h, seed=args.seed, config=cfg)   # warm-up, excluded from stats
+        warm_s = time.perf_counter() - t0
+        print(f"\n[{cfg.name}] load {load_s:.1f}s, warm-up gen {warm_s:.1f}s")
 
-        safe_name = prompt.replace(" ", "_")[:40]
-        img.save(str(out_dir / f"{i:03d}_{safe_name}.png"))
+        rows, images = [], []
+        for i, prompt in enumerate(prompts, 1):
+            res = generate(prompt, w, h, seed=args.seed, config=cfg)
+            images.append(res.image)
+            stem = f"{i:03d}_{prompt.replace(' ', '_')[:40]}"
+            res.image.save(out_dir / f"{stem}.png")
+            if args.save_raw and res.raw is not None:
+                (out_dir / "raw").mkdir(exist_ok=True)
+                res.raw.save(out_dir / "raw" / f"{stem}.png")
+            rows.append({"idx": i, "prompt": prompt, "seed": res.seed, **{k: f"{v:.4f}" for k, v in res.timings.items()}})
+            print(f"  [{i}/{len(prompts)}] {res.timings['total_s']:.1f}s  {prompt!r}")
 
-    # Report
-    timings.sort()
-    n = len(timings)
-    p50 = timings[n // 2] if n else 0
-    p95 = timings[int(n * 0.95)] if n else 0
-    print(f"\n--- Benchmark results ({n} prompts, {w}×{h}, seed={seed}) ---")
-    print(f"  Warm-up:  {warmup_time:.2f}s")
-    print(f"  p50:      {p50:.2f}s")
-    print(f"  p95:      {p95:.2f}s")
-    if timings:
-        print(f"  min:      {timings[0]:.2f}s")
-        print(f"  max:      {timings[-1]:.2f}s")
-    print(f"  Samples saved to {out_dir}/")
+        with open(out_dir / "timings.csv", "w", newline="") as f:
+            wr = csv.DictWriter(f, fieldnames=list(rows[0]))
+            wr.writeheader()
+            wr.writerows(rows)
+        _contact_sheet(images).save(out_dir / "sheet.png")
 
-    # Write results to a file
-    results_file = out_dir / "results.txt"
-    with open(results_file, "w") as f:
-        f.write(f"Benchmark: {n} prompts, {w}x{h}, seed={seed}\n")
-        f.write(f"Hardware: Intel Core i7-1065G7, CPU-only\n")
-        f.write(f"Warm-up: {warmup_time:.2f}s\n")
-        f.write(f"p50: {p50:.2f}s\n")
-        f.write(f"p95: {p95:.2f}s\n")
-        if timings:
-            f.write(f"min: {timings[0]:.2f}s\n")
-            f.write(f"max: {timings[-1]:.2f}s\n")
-        f.write(f"\nPer-prompt timings:\n")
-        for prompt_text, t in zip(prompts, timings):
-            f.write(f"  {t:.2f}s  {prompt_text}\n")
+        tot = np.array([float(r["total_s"]) for r in rows])
+        stage = {k: np.mean([float(r[k]) for r in rows]) for k in ("unet_s", "decode_s", "post_s")}
+        opaque = [float(np.asarray(im.split()[3]).min() == 0) for im in images]
+        summary = (
+            f"variant: {cfg.name}\nconfig: {cfg}\nsize: {w}x{h}  seed: {args.seed}  n: {len(rows)}\n"
+            f"machine: {platform.processor() or platform.machine()}  python {platform.python_version()}\n"
+            f"load_s: {load_s:.2f}  warmup_s: {warm_s:.2f}\n"
+            f"p50: {np.percentile(tot, 50):.2f}s  p95: {np.percentile(tot, 95):.2f}s  "
+            f"min: {tot.min():.2f}s  max: {tot.max():.2f}s\n"
+            f"mean unet: {stage['unet_s']:.2f}s  decode: {stage['decode_s']:.2f}s  post: {stage['post_s']:.3f}s\n"
+            f"transparency rate (any transparent pixel): {np.mean(opaque):.0%}\n"
+        )
+        (out_dir / "summary.txt").write_text(summary)
+        print("\n" + summary)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        prog="pixelgen",
-        description="SpriteStack PixelGen — text-to-pixel-art pipeline",
-    )
+    parser = argparse.ArgumentParser(prog="pixelgen", description="SpriteStack PixelGen")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # generate
-    gen = sub.add_parser("generate", help="Generate a single sprite")
-    gen.add_argument("prompt", help="Text description of the sprite")
-    gen.add_argument("--size", default="32x32", help="WxH (default: 32x32)")
-    gen.add_argument("--seed", type=int, default=None, help="RNG seed (default: random)")
-    gen.add_argument("--out", default="output.png", help="Output file path")
+    g = sub.add_parser("generate", help="Generate a single sprite")
+    g.add_argument("prompt")
+    g.add_argument("--size", default="32x32")
+    g.add_argument("--seed", type=int, default=None)
+    g.add_argument("--variant", default=DEFAULT_VARIANT, choices=sorted(VARIANTS))
+    g.add_argument("--out", default="output.png")
+    _add_common(g)
 
-    # benchmark
-    bench = sub.add_parser("benchmark", help="Run benchmark over a prompt set")
-    bench.add_argument("--prompts", default="benchmarks/prompts.txt", help="Prompts file")
-    bench.add_argument("--size", default="32x32", help="WxH (default: 32x32)")
-    bench.add_argument("--seed", type=int, default=42, help="Fixed seed for reproducibility")
-    bench.add_argument("--out", default="eval/v0", help="Output directory")
+    b = sub.add_parser("benchmark", help="Run prompts through one or more variants")
+    b.add_argument("--prompts", default="benchmarks/prompts.txt")
+    b.add_argument("--size", default="64x64")
+    b.add_argument("--seed", type=int, default=42)
+    b.add_argument("--variant", default="v0", help="comma list, e.g. v0,e1,e2")
+    b.add_argument("--limit", type=int, default=0, help="only first N prompts")
+    b.add_argument("--out", default="eval")
+    _add_common(b)
 
     args = parser.parse_args()
-    if args.command == "generate":
-        cmd_generate(args)
-    elif args.command == "benchmark":
-        cmd_benchmark(args)
+    {"generate": cmd_generate, "benchmark": cmd_benchmark}[args.command](args)
 
 
 if __name__ == "__main__":

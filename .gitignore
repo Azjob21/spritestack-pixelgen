@@ -9,17 +9,24 @@ build/
 venv/
 
 # Models (large binary files — do not commit)
-models/pixel-art-model/
-models/loras/
+models/*/
+!models/.gitkeep
 *.safetensors
 *.ckpt
 *.pt
 *.bin
 *.onnx
+*.xml
 
 # Eval outputs (generated images)
 eval/*/
+eval/*.png
+eval_ov/
+eval_ov_int8/
 !eval/.gitkeep
+*.png
+!docs/samples/*.png
+!test_slime.png
 
 # IDE
 .vscode/
