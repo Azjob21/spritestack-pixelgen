@@ -196,8 +196,13 @@ class SpriteModel:
         self.net.to(self.device).requires_grad_(False)
 
         src, local = (clip_dir, True) if clip_dir else _clip_source(self.cfg.text_model)
-        self.tok = CLIPTokenizerFast.from_pretrained(src, local_files_only=local)
-        self.clip = CLIPTextModel.from_pretrained(src, local_files_only=local).to(self.device).eval().requires_grad_(False)
+        try:
+            # Try offline cache first for instant loading without network retries
+            self.tok = CLIPTokenizerFast.from_pretrained(src, local_files_only=True)
+            self.clip = CLIPTextModel.from_pretrained(src, local_files_only=True).to(self.device).eval().requires_grad_(False)
+        except Exception:
+            self.tok = CLIPTokenizerFast.from_pretrained(src, local_files_only=local)
+            self.clip = CLIPTextModel.from_pretrained(src, local_files_only=local).to(self.device).eval().requires_grad_(False)
         with torch.inference_mode():
             self._null = self._encode("")                       # empty prompt = unconditional branch
 
