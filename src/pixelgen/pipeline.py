@@ -4,6 +4,8 @@ Config-driven diffusion pipeline.
 Experiments are *configs*, not copies of this file. ``VARIANTS`` is a
 cumulative ladder where each row changes exactly one thing from the previous:
 
+    fm16  native 16x16 text-conditioned flow-matching model (sprite_model.py), no SD, no VAE
+
     v0  baseline (legacy prompt, legacy post, seed 42 when unset)
     e1  + trigger word / clean prompt
     e2  + background keying, grid snapping, palette discipline (new post)
@@ -37,6 +39,7 @@ from PIL import Image
 DEFAULT_MODEL_DIR = Path(os.environ.get("PIXELGEN_MODEL_DIR", "models/pixel-art-model"))
 DEFAULT_LORA_DIR = Path(os.environ.get("PIXELGEN_LORA_DIR", "models/loras"))
 DEFAULT_LORA_FILE = "PixelArtRedmond15V-PixelArt-PIXARFK.safetensors"
+DEFAULT_FM_CKPT = Path(os.environ.get("PIXELGEN_FM_CKPT", "models/pixelgen_ema.pt"))
 DEFAULT_TAESD_DIR = Path(os.environ.get("PIXELGEN_TAESD_DIR", "models/taesd"))
 TAESD_HUB_ID = "madebyollin/taesd"  # SD 1.x TAESD
 
@@ -63,6 +66,10 @@ class Config:
     outline: bool = False
     bg_tol: float = 60.0             # RGB distance for backdrop keying ("grid" post only)
     edge_thr: float = 2.0            # edge-bounded flood threshold; 0 = colour keying only
+    # backend: "sd" = Stable Diffusion + LoRA (above), "fm" = native 16x16 flow-matching model.
+    # With "fm", steps/guidance mean flow-matching Euler steps / CFG scale; num_colors and palette
+    # are applied to the 16x16 sprite; output is nearest-neighbour scaled to (width, height).
+    backend: str = "sd"
     # misc
     fixed_seed: Optional[int] = None  # used only when the caller passes no seed (v0 compat)
     threads: Optional[int] = None     # CPU threads; None = PIXELGEN_THREADS or cores // 2
@@ -71,6 +78,8 @@ class Config:
         if self.prompt_style not in ("v0", "v0t", "clean"):
             raise ValueError(
                 f"prompt_style must be 'v0', 'v0t' or 'clean', got {self.prompt_style!r}")
+        if self.backend not in ("sd", "fm"):
+            raise ValueError(f"backend must be 'sd' or 'fm', got {self.backend!r}")
         if self.post not in ("legacy", "grid"):
             raise ValueError(f"post must be 'legacy' or 'grid', got {self.post!r}")
         if self.bg not in BACKGROUNDS:
@@ -101,8 +110,11 @@ _S4 = replace(_V0G, name="s4", steps=4)               # keep CFG, halve steps in
 # Recommended: best quality per second found in the step sweep (4 -> 8 steps, guidance 2.5).
 _S6 = replace(_V0G, name="s6", steps=6, guidance=2.5, tiny_vae=True)
 
+# Native 16x16 flow-matching model trained on the Pixel Art Atlas (see sprite_model.py).
+_FM16 = Config(name="fm16", backend="fm", steps=10, guidance=2.0, num_colors=32)
+
 VARIANTS: dict[str, Config] = {
-    c.name: c for c in (_V0, _E1, _E2, _E3, _E4, _E5, _E6, _V0G, _V0GT, _G3, _G4, _G5, _G6, _G3T, _G3L, _S4, _S6)
+    c.name: c for c in (_V0, _E1, _E2, _E3, _E4, _E5, _E6, _V0G, _V0GT, _G3, _G4, _G5, _G6, _G3T, _G3L, _S4, _S6, _FM16)
 }
 DEFAULT_VARIANT = "s6"
 
@@ -177,6 +189,20 @@ def _threads(cfg: Config) -> int:
     return max(1, (os.cpu_count() or 2) // 2)  # logical -> physical cores (SMT)
 
 
+_fm_cache: dict[str, Any] = {"key": None, "model": None}
+
+
+def _load_fm(cfg: Config, ckpt: Path = DEFAULT_FM_CKPT):
+    key = (str(ckpt), _threads(cfg))
+    if _fm_cache["model"] is None or _fm_cache["key"] != key:
+        from .sprite_model import SpriteModel
+        if not Path(ckpt).is_file():
+            raise FileNotFoundError(f"Flow-matching checkpoint not found: {ckpt} (set PIXELGEN_FM_CKPT)")
+        _fm_cache.update(key=None, model=None)
+        _fm_cache.update(key=key, model=SpriteModel(ckpt, threads=_threads(cfg)))
+    return _fm_cache["model"]
+
+
 def load_pipeline(
     config: Union[None, str, Config] = None,
     model_dir: Path = DEFAULT_MODEL_DIR,
@@ -184,6 +210,8 @@ def load_pipeline(
     lora_file: str = DEFAULT_LORA_FILE,
 ):
     cfg = get_config(config)
+    if cfg.backend == "fm":
+        return _load_fm(cfg)
     key = (cfg.lora_scale, cfg.tiny_vae, str(model_dir), str(lora_dir), lora_file)
     if _cache["pipe"] is not None and _cache["key"] == key:
         return _cache["pipe"]
@@ -249,6 +277,35 @@ def _postprocess(cfg: Config, img: Image.Image, width: int, height: int) -> Imag
                           bg_tol=cfg.bg_tol, edge_thr=cfg.edge_thr)
 
 
+def _fm_finish(rgba, cfg: Config, width: int, height: int) -> Image.Image:
+    """16x16 model output -> palette discipline -> RGBA PIL image of exactly (width, height)."""
+    import numpy as np
+    from . import postprocess as pp
+    rgb, alpha = rgba[..., :3], rgba[..., 3] > 0
+    pal = pp.resolve_palette(cfg.palette)
+    if pal:
+        rgb = pp.snap_to_palette(rgb, pal)
+    elif cfg.num_colors:
+        rgb = pp.quantise_opaque(rgb, alpha, cfg.num_colors)
+    rgb = np.where(alpha[..., None], rgb, 0).astype(np.uint8)
+    im = Image.fromarray(np.dstack([rgb, np.where(alpha, 255, 0).astype(np.uint8)]), "RGBA")
+    if im.size != (width, height):
+        im = im.resize((width, height), Image.Resampling.NEAREST)   # blocky upscale: no new detail
+    return im
+
+
+def _generate_fm(prompt: str, width: int, height: int, seed: int, cfg: Config) -> Result:
+    model = _load_fm(cfg)
+    rgba, tm = model.generate(prompt, seed=seed, steps=cfg.steps, guidance=cfg.guidance)
+    t0 = time.perf_counter()
+    image = _fm_finish(rgba, cfg, width, height)
+    post = time.perf_counter() - t0
+    return Result(image=image, seed=seed, variant=cfg.name, timings={
+        "unet_s": tm["unet_s"], "decode_s": 0.0, "post_s": post,
+        "total_s": tm["clip_s"] + tm["unet_s"] + post, "clip_s": tm["clip_s"],
+    }, raw=None)
+
+
 def generate(
     prompt: str,
     width: int = 32,
@@ -263,6 +320,9 @@ def generate(
     cfg = get_config(config, **overrides)
     if seed is None:
         seed = cfg.fixed_seed if cfg.fixed_seed is not None else int.from_bytes(os.urandom(4), "little")
+
+    if cfg.backend == "fm":
+        return _generate_fm(prompt, width, height, seed, cfg)
 
     pipe = load_pipeline(cfg)
     pos, neg = build_prompts(cfg, prompt)
