@@ -4,3 +4,5 @@
 # Expected layout:
 #   models/pixel-art-model/   (DreamShaper 8 LCM checkpoint)
 #   models/loras/             (PixelArt Redmond LoRA .safetensors)
+#   models/pixelgen_ema.pt    (Native 16x16 flow matching checkpoint, ~61MB)
+#   models/clip/              (Offline CLIP text encoder, optional)
