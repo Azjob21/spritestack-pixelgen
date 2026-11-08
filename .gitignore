@@ -11,12 +11,14 @@ venv/
 # Models (large binary files — do not commit)
 models/*/
 !models/.gitkeep
+newmodel/
 *.safetensors
 *.ckpt
 *.pt
 *.bin
 *.onnx
 *.xml
+*.zip
 
 # Eval outputs (generated images)
 eval/*/

@@ -75,3 +75,21 @@ def test_rescue_variants_change_one_thing_from_their_parent():
 def test_override_names_are_distinct_so_output_dirs_dont_collide():
     a, b = get_config("g3", lora_scale=1.3), get_config("g3", lora_scale=1.5)
     assert a.name != b.name and a.name.startswith("g3+")
+
+
+def test_fm16_variant_and_backend_validation():
+    assert "fm16" in VARIANTS
+    fm = VARIANTS["fm16"]
+    assert fm.backend == "fm"
+    assert fm.steps == 10
+    assert fm.guidance == 2.0
+    assert fm.num_colors == 32
+
+    cfg = get_config("fm16", steps=15, guidance=3.0)
+    assert cfg.backend == "fm"
+    assert cfg.steps == 15
+    assert cfg.guidance == 3.0
+
+    with pytest.raises(ValueError, match="backend must be 'sd' or 'fm'"):
+        Config(backend="invalid")
+
