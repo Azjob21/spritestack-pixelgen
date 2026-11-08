@@ -46,20 +46,71 @@ All sprites below were generated with the **v0** pipeline (the original baseline
 
 ## What this is (and is not)
 
-PixelGen **composes existing open models** — it does not train a new one.
-
-The original work is the **pipeline**: prompt design, LCM fast sampling, LoRA fusing, background keying, pixel-grid snapping, palette reduction, sprite cleanup, an OpenVINO CPU path, and Studio integration.
+PixelGen provides two sprite-generation backends:
+1. **Native 16×16 Flow-Matching Model (`fm16`)**: A custom 30.4M-parameter UNet trained from scratch for native-resolution 16×16 RGBA sprites. Generates sprites in **under 1 second on CPU** (~0.78 s at 10 steps) with direct learned alpha transparency.
+2. **Diffusion Pipeline (`s6` / `v0` / `s4`)**: Composes Stable Diffusion 1.5 LCM, the PixelArt Redmond LoRA (512×512), and the TAESD decoder with post-processing (keying, grid snapping, palette discipline).
 
 | Component       | Used                                                                                                  | Source                                                  |
 | --------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Base model      | Stable Diffusion 1.5, DreamShaper 8 LCM                                                               | `Lykon/dreamshaper-8-lcm`                               |
+| Native FM Model | 30.4M UNet, 16×16 native RGBA, CLIP ViT-B/32 text conditioning (`fm16` variant)                        | trained from scratch on `Angais/pixel-art-atlas-1.4m`   |
+| Base SD Model   | Stable Diffusion 1.5, DreamShaper 8 LCM                                                               | `Lykon/dreamshaper-8-lcm`                               |
 | Style LoRA      | PixelArt Redmond 1.5V (SD 1.5), fused at scale 0.9                                                    | `artificialguybr/pixelartredmond-1-5v-pixel-art-loras-for-sd-1-5` |
-| Scheduler       | `LCMScheduler`, 6 steps, guidance 2.5 (default `s6`)                                                  | diffusers                                               |
-| Decoder         | TAESD (tiny VAE)                                                                                      | `madebyollin/taesd`                                     |
-| Post-processing | Background keying, median-per-cell grid snapping, palette snapping, cleanup, optional outline         | this repo                                               |
+| Scheduler       | Flow-matching Euler sampler (`fm16`) or `LCMScheduler` (`s6`, 6 steps, guidance 2.5)                  | this repo / diffusers                                   |
+| Decoder         | Direct RGBA channels (`fm16`) or TAESD tiny VAE (`s6`)                                                | this repo / `madebyollin/taesd`                         |
+| Post-processing | Palette snapping (DB32 / PICO-8 / Endesga 32), quantisation, background keying, grid snapping         | this repo                                               |
 | CPU runtime     | PyTorch (default) or OpenVINO fp32 / int8 via `optimum-intel` (benchmark script)                      | `optimum-intel`                                         |
 
-Model weights are **not** distributed here. See [Licences](#licences) before redistributing.
+Model weights are **not** distributed directly in git. See [Licences](#licences) before redistributing.
+
+---
+
+## Native 16×16 Flow-Matching Model (`fm16`)
+
+To overcome the latency and resolution mismatch of running full SD 1.5 at 512px on CPU (~74s per sprite), we trained a small native-resolution flow-matching model from scratch on Kaggle GPU.
+
+### Training Details
+
+1. **Prototype validation (`pixelgen_proto`)**:
+   - Class-conditional RGBA flow matching trained on a Kaggle 16×16 sprite dataset (89,400 images, ~1,076 unique after deduplication across 5 classes).
+   - Validated the end-to-end loop: RGBA alpha keying, Euler flow-matching formulation, exponential moving average (EMA), resume checkpoints, and sampling.
+2. **Production model (`pixelgen_text`)**:
+   - Text-conditioned flow matching trained on Hugging Face dataset [`Angais/pixel-art-atlas-1.4m`](https://huggingface.co/datasets/Angais/pixel-art-atlas-1.4m) (1.41M synthetic 16×16 RGBA sprites with captions; icon-category subjects filtered out).
+   - **Architecture**: 30.4M-parameter UNet, native 16×16 spatial resolution, 4 channels (RGBA where alpha is learned directly and thresholded at 0).
+   - **Text conditioning**: Frozen CLIP ViT-B/32 (`openai/clip-vit-base-patch32`), cross-attention in UNet, 10% caption dropout for classifier-free guidance (CFG), max 32 text tokens.
+   - **Optimization**: 60,000 steps, batch size 256, AdamW optimizer with cosine learning rate decay (initial lr 2e-4), EMA 0.9995. Checkpoint exported as a slim fp16 EMA file (`models/pixelgen_ema.pt`, ~61 MB).
+
+### Flow-Matching vs SD Benchmarks (CPU)
+
+Measured on an Intel Core i7-1065G7 (4 threads, CPU-only):
+
+| Backend / Variant | Steps | Guidance | Latency (p50) | Notes |
+| ----------------- | ----- | -------- | ------------- | ----- |
+| **`fm16` (Native FM)** | **10** | **2.0** | **~0.78 s** | **Sub-second generation on CPU.** 10 steps is visually sufficient. |
+| `fm16` (Native FM) | 20 | 2.0 | ~1.36 s | Marginally smoother shading |
+| `fm16` (Native FM) | 30 | 2.0 | ~2.07 s | Nearly identical to 10 and 20 steps with fixed seed |
+| `s6` (OpenVINO int8) | 6 | 2.5 | 50.7 s | Best SD-based CPU time |
+| `s6` (SD 1.5 + LoRA) | 6 | 2.5 | 73.8 s | Recommended SD variant |
+| `v0` (SD 1.5 baseline) | 8 | 1.8 | 96.0 s | Baseline reference |
+
+- **Step sweep**: A fixed seed yields virtually identical sprites at 10, 20, and 30 steps; 10 steps is chosen as the default.
+- **Guidance sweep**: Visual variety drops sharply between guidance 1.5 and 3.0 and plateaus (3.0 and 4.5 look nearly identical). The default is `steps=10, guidance=2.0`.
+- **Model load time**: ~12 seconds cold-start.
+
+---
+
+## Known Limitations
+
+### Native 16×16 Model (`fm16`)
+- **Native resolution is 16×16**: Requests for 32×32, 64×64, etc., are nearest-neighbour blocky upscales without hallucinated details.
+- **Pose variety**: Across random seeds for a given prompt, pose variations are modest; changes are mostly shading, accessories, and small details.
+- **Prompt sensitivity**: Concrete nouns with colours and materials work best (e.g. `"red dragon"`, `"wizard with a staff"`, `"purple bat"`). Emotion words like `"angry"` steer toward face/mask icons.
+- **Synthetic training data**: Dataset is AI-generated (Krea 2 Turbo + LoRA); aesthetics reflect this source and Krea 2 Community License terms apply. Captions are approximate.
+- **Server command-line**: `server.py` does not expose CLI flags for default steps and guidance (though the API and web UI accept per-request overrides).
+
+### Diffusion Baseline (`s6` / `v0`)
+- **Slow CPU latency**: Takes ~74s on CPU at 6 steps.
+- **Warm-toned ground rims**: Neutral-grey cleanup occasionally misses warm shadows.
+- **Stray scene elements**: Small detached artifacts can appear before cleanup.
 
 ---
 
@@ -208,23 +259,57 @@ Fixed since v0: transparency (hard 0/255 alpha via background keying), grid deci
 # Install
 pip install -e ".[dev]"
 
-# Generate a sprite (default variant: s6)
+# Generate with native 16x16 Flow-Matching model (~0.8s on CPU)
+python -m pixelgen generate "small green slime" --variant fm16 --size 16x16 --seed 42 --out slime.png
+
+# Generate with SD 1.5 + LoRA pipeline (default variant: s6)
 python -m pixelgen generate "knight with silver armor" --size 64x64 --seed 7 --out knight.png
 
 # Run a benchmark (writes timings.csv, summary.txt, sheet.png)
 python -m pixelgen benchmark --prompts benchmarks/hard3.txt --save-raw --out eval/
 
 # Override any setting for an ablation
-python -m pixelgen benchmark --variant s6 --steps 8 --prompts benchmarks/hard3.txt --out eval/
+python -m pixelgen benchmark --variant fm16 --steps 10 --guidance 2.0 --prompts benchmarks/hard3.txt --out eval/
+```
 
-# Start the Studio-compatible API server
+### Interactive Web UI (Sprite Playground)
+
+A lightweight web interface is built directly into the FastAPI server for textual testing and prompt iteration:
+
+```bash
 pip install -e ".[server]"
 python -m pixelgen.server --port 8000
 ```
 
-> **Note:** Place model weights under `models/pixel-art-model/` and `models/loras/` before running. See [models/.gitkeep](models/.gitkeep) for details.
+Open `http://localhost:8000` in your browser:
+- Text prompt input with quick preset chips
+- Real-time model switching (`fm16`, `s6`, etc.)
+- Zoom levels (1x, 2x, 4x, 8x, 12x) with pixelated rendering
+- Transparent checkerboard canvas and direct PNG downloads
+- Detailed latency breakdown (Total, UNet/Euler, CLIP, post-processing)
+- Generation history reel
 
-### Optional: OpenVINO (faster on CPU)
+### Flow-Matching Tools
+
+Dedicated tools are located in `tools/`:
+
+```bash
+# CPU timing and step sweeps on the native model
+python tools/bench_fm_cpu.py --ckpt models/pixelgen_ema.pt --threads 4 --steps 10,20,30 --n 8 --save-grid bench.png
+
+# Prompt x seed contact sheet and guidance sweeps
+python tools/prompt_grid.py --ckpt models/pixelgen_ema.pt --steps 10 --guidance 2.0 --seeds 6 \
+    --prompts "blue dragon" "red dragon" "fire dragon" --out grid.png
+```
+
+> **Note:** Place model weights under `models/` before running:
+> - `models/pixelgen_ema.pt`: Native 16×16 model checkpoint (~61 MB)
+> - `models/pixel-art-model/` and `models/loras/`: SD 1.5 weights (for diffusion variants)
+> - `models/clip/`: Offline CLIP text encoder (optional; downloaded automatically if missing)
+>
+> See [models/.gitkeep](models/.gitkeep) for details.
+
+### Optional: OpenVINO (faster on CPU for SD variants)
 
 ```bash
 pip install optimum-intel[openvino]
@@ -246,18 +331,23 @@ For int8 weights, convert the fused model with `optimum-cli export openvino --mo
 ```
 spritestack-pixelgen/
 ├── src/pixelgen/
-│   ├── pipeline.py         # config-driven pipeline, VARIANTS registry (default: s6)
+│   ├── pipeline.py         # config-driven pipeline, VARIANTS registry (default: s6, adds fm16)
+│   ├── sprite_model.py     # native 16x16 UNet, CLIP text encoder, Euler sampler
 │   ├── postprocess.py      # keying, grid snapping, palette, cleanup, outline
 │   ├── palettes.py         # DB32, PICO-8, Endesga 32 palette data
 │   ├── encode.py           # fast RGBA <-> hex encoding
 │   ├── cli.py              # generate + benchmark commands
-│   └── server.py           # FastAPI drop-in for Studio
+│   └── server.py           # FastAPI drop-in for Studio + interactive web playground
+├── tools/
+│   ├── bench_fm_cpu.py     # CPU latency & step sweep benchmark for native model
+│   └── prompt_grid.py      # prompt x seed contact sheet & guidance sweep tool
 ├── ov_bench.py             # OpenVINO export + benchmark
 ├── benchmarks/             # prompts.txt (30 prompts), hard3.txt (dragon, wizard, skeleton)
 ├── docs/samples/           # generated sprite gallery
 ├── eval/                   # benchmark outputs per experiment
-├── tests/                  # unit tests (52 passing)
-└── models/                 # weights (gitignored)
+├── tests/                  # unit tests (56 passing)
+├── models/                 # inference weights (gitignored, see models/.gitkeep)
+└── newmodel/               # training checkpoints & sample grids (gitignored)
 ```
 
 ---
@@ -282,8 +372,10 @@ Currently reported: latency (p50 / p95) and transparency rate. The rest are plan
 
 Code: **MIT**. Model weights keep their original licences and are not distributed in this repo.
 
-| Model                    | Licence                                                                              |
+| Model / Dataset          | Licence                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
+| Pixel Art Atlas 1.4M     | CC0 (sprites & captions); also subject to Krea 2 Community License terms stated on dataset card. |
+| OpenAI CLIP ViT-B/32     | MIT License                                                                          |
 | PixelArt Redmond 1.5V    | Listed on Hugging Face as `bespoke-lora-trained-license` (other). Read the model card before reuse. |
 | DreamShaper 8 LCM        | See its [model card](https://huggingface.co/Lykon/dreamshaper-8-lcm)                 |
 | TAESD                    | See its [model card](https://huggingface.co/madebyollin/taesd)                       |
@@ -294,10 +386,11 @@ SpriteStack Studio is a project to showcase the models, not a commercial product
 
 ## Credits
 
+- **Native 16x16 Model:** Trained from scratch on [`Angais/pixel-art-atlas-1.4m`](https://huggingface.co/datasets/Angais/pixel-art-atlas-1.4m) using frozen OpenAI CLIP text conditioning
 - **Base model:** DreamShaper 8 LCM (see its [model card](https://huggingface.co/Lykon/dreamshaper-8-lcm))
 - **Style LoRA:** PixelArt Redmond 1.5V by artificialguybr (see its [model card](https://huggingface.co/artificialguybr/pixelartredmond-1-5v-pixel-art-loras-for-sd-1-5))
 - **Tiny VAE:** TAESD by madebyollin
-- **Libraries:** Hugging Face `diffusers`, PyTorch, Pillow, SciPy, `optimum-intel` / OpenVINO
+- **Libraries:** Hugging Face `diffusers`, `transformers`, PyTorch, Pillow, SciPy, FastAPI, `optimum-intel` / OpenVINO
 - **Project:** Part of [SpriteStack Studio](https://github.com/Azjob21/spritestack) (supervised by Prof. Chaib Souleyman)
 
 ## License
